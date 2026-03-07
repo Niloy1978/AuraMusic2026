@@ -12,17 +12,9 @@ app.use(express.static(path.join(__dirname)));
 const streamCache = new Map();
 
 // ==========================================
-// 2. CLOUD-SMART STREAM API (ROBUST PROXY BYPASS)
+// 2. CLEAN & SOLID STREAM API (FOR VPS ONLY)
 // ==========================================
-// A list of reliable public Piped instances
-const PIPED_INSTANCES = [
-    'https://pipedapi.kavin.rocks',
-    'https://pipedapi.tokhmi.xyz',
-    'https://api.piped.projectsegfau.lt',
-    'https://pipedapi.smnz.de'
-];
-
-app.get('/api/stream', async (req, res) => {
+app.get('/api/stream', (req, res) => {
     const videoId = req.query.videoId;
     if (!videoId) return res.status(400).json({ error: 'No videoId' });
 
@@ -32,38 +24,27 @@ app.get('/api/stream', async (req, res) => {
         return res.json({ url: cached.url });
     }
 
-    let bestAudioUrl = null;
+    // Automatically detect Windows (local testing) vs Linux (VPS)
+    const isWindows = process.platform === 'win32';
+    const ytDlpPath = isWindows ? path.join(__dirname, 'yt-dlp.exe') : path.join(__dirname, 'yt-dlp');
+    
+    // Clean, direct execution using your dedicated IP
+    const command = `"${ytDlpPath}" --force-ipv4 --no-warnings -g -f "140/bestaudio/best" "https://www.youtube.com/watch?v=${videoId}"`;
 
-    // Try each proxy server one by one until one works!
-    for (const instance of PIPED_INSTANCES) {
-        try {
-            const response = await fetch(`${instance}/streams/${videoId}`);
-            if (!response.ok) continue; // If this server is down, instantly skip to the next one
-            
-            const data = await response.json();
-            const audioStreams = data.audioStreams || [];
-            if (audioStreams.length === 0) continue; // If no audio, skip
-            
-            // Grab the high-quality M4A format
-            const bestAudio = audioStreams.find(s => s.mimeType.includes('audio/mp4')) || audioStreams[0];
-            bestAudioUrl = bestAudio.url;
-            
-            console.log(`Successfully fetched from: ${instance}`);
-            break; // We found the song! Stop the loop.
-
-        } catch (error) {
-            console.log(`Proxy ${instance} failed, trying next...`);
+    exec(command, (error, stdout, stderr) => {
+        if (error) {
+            console.error('yt-dlp error:', error.message);
+            return res.status(500).json({ error: 'Failed to load song.' });
         }
-    }
-
-    // Did we find a working URL from any of the proxies?
-    if (bestAudioUrl) {
-        streamCache.set(videoId, { url: bestAudioUrl, timestamp: Date.now() });
-        res.json({ url: bestAudioUrl });
-    } else {
-        console.error('All proxies failed for video:', videoId);
-        res.status(500).json({ error: 'All proxy servers are currently overloaded. Please try again in a moment.' });
-    }
+        
+        if (stdout) {
+            const url = stdout.trim();
+            streamCache.set(videoId, { url: url, timestamp: Date.now() });
+            res.json({ url: url });
+        } else {
+            res.status(500).json({ error: 'No URL returned.' });
+        }
+    });
 });
 
 // ==========================================
