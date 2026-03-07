@@ -12,63 +12,39 @@ app.use(express.static(path.join(__dirname)));
 const streamCache = new Map();
 
 // ==========================================
-// 1. SEARCH API
+// 2. CLOUD-SMART STREAM API (PROXY BYPASS)
 // ==========================================
-app.get('/api/search', async (req, res) => {
-    const query = req.query.query?.trim();
-    if (!query) return res.status(400).json({ error: 'Query required' });
+app.get('/api/stream', async (req, res) => {
+    const videoId = req.query.videoId;
+    if (!videoId) return res.status(400).json({ error: 'No videoId' });
+
+    // Check Cache
+    const cached = streamCache.get(videoId);
+    if (cached && Date.now() - cached.timestamp < 60 * 60 * 1000) {
+        return res.json({ url: cached.url });
+    }
 
     try {
-        const results = await require('yt-search')(query);
+        // We use Piped API, an open-source proxy network that bypasses YouTube blocks for us!
+        const response = await fetch(`https://pipedapi.kavin.rocks/streams/${videoId}`);
+        if (!response.ok) throw new Error('Proxy server refused connection');
         
-        // TITLE CLEANER: Scrubs messy YouTube text
-        const cleanText = (text) => {
-            if (!text) return '';
-            return text.replace(/\[.*?\]/g, '') // Removes [Official Video], [4K], etc.
-                       .replace(/\(.*?(video|audio|lyric|visualizer).*?\)/gi, '') // Removes (Official Music Video)
-                       .replace(/\|.*/g, '') // Removes weird trailing pipe text
-                       .replace(/- official.*/gi, '') // Removes "- Official..."
-                       .replace(/ - Topic/gi, '') // Cleans up artist topics
-                       .trim();
-        };
+        const data = await response.json();
+        
+        // Find the best audio-only stream
+        const audioStreams = data.audioStreams || [];
+        if (audioStreams.length === 0) throw new Error('No audio found');
+        
+        // Grab the high-quality M4A format (plays perfectly in all web browsers)
+        const bestAudio = audioStreams.find(s => s.mimeType.includes('audio/mp4')) || audioStreams[0];
 
-        // 1. Get Songs
-        const songs = results.videos
-            .filter(v => v.seconds > 60 && !v.title.toLowerCase().includes('short'))
-            .slice(0, 15)
-            .map(v => ({
-                videoId: v.videoId,
-                title: cleanText(v.title),
-                artist: cleanText(v.author.name) || 'Unknown',
-                cover: v.thumbnail,
-                duration: v.seconds
-            }));
+        // Cache the URL so the next listener gets it instantly
+        streamCache.set(videoId, { url: bestAudio.url, timestamp: Date.now() });
+        res.json({ url: bestAudio.url });
 
-        // 2. Get Artists (Channels)
-        const artists = (results.channels || results.accounts || [])
-            .slice(0, 6)
-            .map(c => ({
-                id: c.url,
-                name: cleanText(c.name),
-                cover: c.thumbnail || c.image || 'https://picsum.photos/100',
-                subscribers: c.subCountLabel || 'Artist'
-            }));
-
-        // 3. Get Albums (Playlists)
-        const albums = (results.playlists || results.lists || [])
-            .slice(0, 6)
-            .map(p => ({
-                listId: p.listId,
-                title: cleanText(p.title),
-                artist: cleanText(p.author.name) || 'Various Artists',
-                cover: p.thumbnail || p.image || 'https://picsum.photos/200',
-                songCount: p.videoCount
-            }));
-
-        res.json({ songs, artists, albums });
-    } catch (err) {
-        console.error("Search Error:", err.message);
-        res.status(500).json({ error: 'Search failed' });
+    } catch (error) {
+        console.error('Streaming error:', error.message);
+        res.status(500).json({ error: 'Failed to load song from cloud proxies.' });
     }
 });
 
