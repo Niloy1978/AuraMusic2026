@@ -12,8 +12,16 @@ app.use(express.static(path.join(__dirname)));
 const streamCache = new Map();
 
 // ==========================================
-// 2. CLOUD-SMART STREAM API (PROXY BYPASS)
+// 2. CLOUD-SMART STREAM API (ROBUST PROXY BYPASS)
 // ==========================================
+// A list of reliable public Piped instances
+const PIPED_INSTANCES = [
+    'https://pipedapi.kavin.rocks',
+    'https://pipedapi.tokhmi.xyz',
+    'https://api.piped.projectsegfau.lt',
+    'https://pipedapi.smnz.de'
+];
+
 app.get('/api/stream', async (req, res) => {
     const videoId = req.query.videoId;
     if (!videoId) return res.status(400).json({ error: 'No videoId' });
@@ -24,27 +32,37 @@ app.get('/api/stream', async (req, res) => {
         return res.json({ url: cached.url });
     }
 
-    try {
-        // We use Piped API, an open-source proxy network that bypasses YouTube blocks for us!
-        const response = await fetch(`https://pipedapi.kavin.rocks/streams/${videoId}`);
-        if (!response.ok) throw new Error('Proxy server refused connection');
-        
-        const data = await response.json();
-        
-        // Find the best audio-only stream
-        const audioStreams = data.audioStreams || [];
-        if (audioStreams.length === 0) throw new Error('No audio found');
-        
-        // Grab the high-quality M4A format (plays perfectly in all web browsers)
-        const bestAudio = audioStreams.find(s => s.mimeType.includes('audio/mp4')) || audioStreams[0];
+    let bestAudioUrl = null;
 
-        // Cache the URL so the next listener gets it instantly
-        streamCache.set(videoId, { url: bestAudio.url, timestamp: Date.now() });
-        res.json({ url: bestAudio.url });
+    // Try each proxy server one by one until one works!
+    for (const instance of PIPED_INSTANCES) {
+        try {
+            const response = await fetch(`${instance}/streams/${videoId}`);
+            if (!response.ok) continue; // If this server is down, instantly skip to the next one
+            
+            const data = await response.json();
+            const audioStreams = data.audioStreams || [];
+            if (audioStreams.length === 0) continue; // If no audio, skip
+            
+            // Grab the high-quality M4A format
+            const bestAudio = audioStreams.find(s => s.mimeType.includes('audio/mp4')) || audioStreams[0];
+            bestAudioUrl = bestAudio.url;
+            
+            console.log(`Successfully fetched from: ${instance}`);
+            break; // We found the song! Stop the loop.
 
-    } catch (error) {
-        console.error('Streaming error:', error.message);
-        res.status(500).json({ error: 'Failed to load song from cloud proxies.' });
+        } catch (error) {
+            console.log(`Proxy ${instance} failed, trying next...`);
+        }
+    }
+
+    // Did we find a working URL from any of the proxies?
+    if (bestAudioUrl) {
+        streamCache.set(videoId, { url: bestAudioUrl, timestamp: Date.now() });
+        res.json({ url: bestAudioUrl });
+    } else {
+        console.error('All proxies failed for video:', videoId);
+        res.status(500).json({ error: 'All proxy servers are currently overloaded. Please try again in a moment.' });
     }
 });
 
